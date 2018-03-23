@@ -12,9 +12,12 @@ using NServiceBus;
 
 class Program
 {
-    public static ConcurrentDictionary<long, (DateTime sentAt, long batch)> sentAndReceived = new ConcurrentDictionary<long, (DateTime, long)>();
-    
+    public static ConcurrentDictionary<long, (DateTime sentAt, long batch)> sent = new ConcurrentDictionary<long, (DateTime, long)>();
+    public static ConcurrentDictionary<long, (DateTime sentAt, long batch)> received = new ConcurrentDictionary<long, (DateTime, long)>();
+
     public static ConcurrentBag<StatsEntry> stats = new ConcurrentBag<StatsEntry>();
+    static string EndpointName = "Sqs.Concurrency.Tests";
+    static string QueueName = EndpointName.Replace(".", "-");
 
     public struct StatsEntry
     {
@@ -34,13 +37,13 @@ class Program
     
     static async Task Main()
     {
-        Console.Title = "Sqs.Concurrency.Tests";
+        Console.Title = EndpointName;
 
         Console.WriteLine("Purging queues");
         var client = new AmazonSQSClient();
         try
         {
-            var inputQueue = await client.GetQueueUrlAsync("Sqs-Concurrency-Tests");
+            var inputQueue = await client.GetQueueUrlAsync(QueueName);
             await client.PurgeQueueAsync(inputQueue.QueueUrl);
         }
         catch (QueueDoesNotExistException)
@@ -49,7 +52,7 @@ class Program
 
         Console.WriteLine("Queues purged.");
         
-        var endpointConfiguration = new EndpointConfiguration("Sqs.Concurrency.Tests");
+        var endpointConfiguration = new EndpointConfiguration(EndpointName);
         var transport = endpointConfiguration.UseTransport<SqsTransport>();
 
         endpointConfiguration.SendFailedMessagesTo("error");
@@ -100,10 +103,12 @@ class Program
                         var now = DateTime.UtcNow;
                         var myMessage = new MyMessage
                         {
-                            Attempt = localAttempt
+                            Attempt = localAttempt,
+                            Batch = batchNr,
+                            SentAt = now
                         };
 
-                        sentAndReceived.TryAdd(localAttempt, (now, batchNr));
+                        sent.TryAdd(localAttempt, (now, batchNr));
 
                         await endpointInstance.SendLocal(myMessage)
                             .ConfigureAwait(false);
@@ -140,11 +145,14 @@ class Program
         {
             Console.Clear();
             Console.WriteLine("--- Current state ---");
-            if (!sentAndReceived.IsEmpty)
+
+            var allNotReceived = sent.ToArray().OrderBy(x => x.Key).Select(x => x.Key).Except(received.ToArray().OrderBy(x => x.Key).Select(x => x.Key).ToArray()).ToArray();
+
+            if (allNotReceived.Length != 0)
             {
-                foreach (var entry in sentAndReceived.OrderBy(x => x.Value.batch))
+                foreach (var entry in allNotReceived)
                 {
-                    Console.WriteLine($"'{entry.Key}'");
+                    Console.WriteLine($"'{entry}'");
                 }
             }
             else
@@ -169,13 +177,21 @@ class Program
     {
         await syncher.Task;
         
-        while (!sentAndReceived.IsEmpty)
+        while (true)
         {
             Console.Clear();
             Console.WriteLine("--- Not yet received ---");
-            foreach (var entry in sentAndReceived.OrderBy(e => e.Value.batch))
+
+            var allNotReceived = sent.ToArray().OrderBy(x => x.Key).Select(x => x.Key).Except(received.ToArray().OrderBy(x => x.Key).Select(x => x.Key).ToArray()).ToArray();
+
+            if (allNotReceived.Length == 0)
             {
-                Console.WriteLine($"'{entry.Key}' to be received at '{entry.Value.sentAt.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture)}'");
+                break;
+            }
+
+            foreach (var entry in allNotReceived)
+            {
+                Console.WriteLine($"'{entry}' to be received.'");
             }
 
             Console.WriteLine("--- Not yet received ---");
@@ -199,7 +215,7 @@ class Program
 
     static async Task WriteStats()
     {
-        using (var writer = new StreamWriter(@".\stats.csv", false))
+        using (var writer = new StreamWriter("stats.csv", false))
         {
             await writer.WriteLineAsync($"{nameof(StatsEntry.Id)},{nameof(StatsEntry.Batch)},{nameof(StatsEntry.SentAt)},{nameof(StatsEntry.ReceivedAt)},Delta");
             foreach (var statsEntry in stats.OrderBy(s => s.SentAt))

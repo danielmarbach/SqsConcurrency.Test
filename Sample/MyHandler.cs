@@ -10,14 +10,8 @@ public class MyHandler :
 
     public Task Handle(MyMessage message, IMessageHandlerContext context)
     {
-        if (Program.sentAndReceived.TryRemove(message.Attempt, out var sentAt))
-        {
-            Program.stats.Add(new Program.StatsEntry(message.Attempt, sentAt.batch, sentAt.sentAt, DateTime.UtcNow));    
-        }
-        else 
-        {
-            throw new InvalidOperationException($"{message.Attempt} not found");
-        }
+        Program.received.AddOrUpdate(message.Attempt, (message.SentAt, message.Batch), (l, tuple) => (message.SentAt, message.Batch));
+        Program.stats.Add(new Program.StatsEntry(message.Attempt, message.Batch, message.SentAt, DateTime.UtcNow));   
         
         return Task.CompletedTask;
     }

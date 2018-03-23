@@ -12,18 +12,18 @@ using NServiceBus;
 
 class Program
 {
-    public static ConcurrentDictionary<string, (DateTime sentAt, long batch)> sentAndReceived = new ConcurrentDictionary<string, (DateTime, long)>();
+    public static ConcurrentDictionary<long, (DateTime sentAt, long batch)> sentAndReceived = new ConcurrentDictionary<long, (DateTime, long)>();
     
     public static ConcurrentBag<StatsEntry> stats = new ConcurrentBag<StatsEntry>();
 
     public struct StatsEntry
     {
-        public string Id;
+        public long Id;
         public DateTime ReceivedAt;
         public DateTime SentAt;
         public long Batch;
 
-        public StatsEntry(string id, long batch, DateTime sentAt, DateTime receivedAt)
+        public StatsEntry(long id, long batch, DateTime sentAt, DateTime receivedAt)
         {
             Id = id;
             SentAt = sentAt;
@@ -56,11 +56,14 @@ class Program
         endpointConfiguration.EnableInstallers();
         endpointConfiguration.UsePersistence<InMemoryPersistence>();
         endpointConfiguration.LimitMessageProcessingConcurrencyTo(32);
+        var recoverabilitySettings = endpointConfiguration.Recoverability();
+        recoverabilitySettings.Delayed(x => x.NumberOfRetries(0));
+        recoverabilitySettings.AddUnrecoverableException<InvalidOperationException>();
 
         var endpointInstance = await Endpoint.Start(endpointConfiguration)
             .ConfigureAwait(false);
 
-        var cts = new CancellationTokenSource(TimeSpan.FromHours(1));
+        var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
         var syncher = new TaskCompletionSource<bool>();
         
         var sendTask = Task.Run(() => Sending(endpointInstance, cts.Token, syncher), CancellationToken.None);
@@ -87,7 +90,7 @@ class Program
 
             while (!token.IsCancellationRequested)
             {
-                var numberOfMessagesToSend = random.Next(1, 128);
+                var numberOfMessagesToSend = random.Next(1, 256);
                 var sendTask = new List<Task>(numberOfMessagesToSend);
                 batchSend++;
                 for (var i = 0; i < numberOfMessagesToSend; i++)
@@ -97,20 +100,20 @@ class Program
                         var now = DateTime.UtcNow;
                         var myMessage = new MyMessage
                         {
-                            Attempt = $"MyMessageSmall/Batch {batchNr}/Attempt {localAttempt}/Sent at '{now.ToString("yyyy-MM-dd HH:mm:ss:ffffff", CultureInfo.InvariantCulture)}'"
+                            Attempt = localAttempt
                         };
+
+                        sentAndReceived.TryAdd(localAttempt, (now, batchNr));
 
                         await endpointInstance.SendLocal(myMessage)
                             .ConfigureAwait(false);
-
-                        sentAndReceived.AddOrUpdate(myMessage.Attempt, (now, batchNr), (s, v) => (now, batchNr));
                     }
 
                     sendTask.Add(SendMessage(attempt++, batchSend));
                 }
 
                 await Task.WhenAll(sendTask);
-                await Task.Delay(TimeSpan.FromSeconds(random.Next(1, 5)), token);
+                await Task.Delay(TimeSpan.FromSeconds(random.Next(1, 2)), token);
             }
         }
         catch (OperationCanceledException)
@@ -139,7 +142,7 @@ class Program
             Console.WriteLine("--- Current state ---");
             if (!sentAndReceived.IsEmpty)
             {
-                foreach (var entry in sentAndReceived.OrderBy(x => x.Value))
+                foreach (var entry in sentAndReceived.OrderBy(x => x.Value.batch))
                 {
                     Console.WriteLine($"'{entry.Key}'");
                 }
@@ -154,7 +157,7 @@ class Program
             
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(20), token);
+                await Task.Delay(TimeSpan.FromSeconds(10), token);
             }
             catch (OperationCanceledException)
             {
@@ -170,7 +173,7 @@ class Program
         {
             Console.Clear();
             Console.WriteLine("--- Not yet received ---");
-            foreach (var entry in sentAndReceived.OrderBy(e => e.Value))
+            foreach (var entry in sentAndReceived.OrderBy(e => e.Value.batch))
             {
                 Console.WriteLine($"'{entry.Key}' to be received at '{entry.Value.sentAt.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture)}'");
             }
@@ -179,7 +182,7 @@ class Program
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(20));
+                await Task.Delay(TimeSpan.FromSeconds(10));
             }
             catch (OperationCanceledException)
             {

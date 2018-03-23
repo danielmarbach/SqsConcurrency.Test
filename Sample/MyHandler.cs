@@ -14,6 +14,10 @@ public class MyHandler :
         {
             Program.stats.Add(new Program.StatsEntry(message.Attempt, sentAt.batch, sentAt.sentAt, DateTime.UtcNow));    
         }
+        else 
+        {
+            throw new InvalidOperationException($"{message.Attempt} not found");
+        }
         
         return Task.CompletedTask;
     }
